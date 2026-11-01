@@ -188,7 +188,7 @@ async function runOne({ udid, device, runtime, browser: label, dir }) {
       await sleep(900);
       await driver.saveScreenshot(path.join(dir, `0${k + 1}-scroll${k}.png`));
     }
-    await driver.execute('window.scrollTo(0,0)'); await sleep(600);
+    await exec('window.scrollTo(0,0)'); await sleep(600);
 
     // 1. Shade: tap "חום בינוני" (medium brown) with a real touch.
     const shadeSel = '.nh-shade-option-v2[data-nova-shade="mediumbrown"], .nh-shade-option-v2[data-nova-shade="medium"]';
