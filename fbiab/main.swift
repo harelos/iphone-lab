@@ -3,12 +3,14 @@
 // Launch arguments: -url <url> -mode fb|ig
 import UIKit
 import WebKit
+import Network
 
 final class BrowserController: UIViewController, WKNavigationDelegate, WKScriptMessageHandler {
     var webView: WKWebView!
     let bar = UIView()
     let titleLabel = UILabel()
     var log: [[String: Any]] = []
+    var server: LabServer?
 
     func arg(_ name: String) -> String? {
         let a = ProcessInfo.processInfo.arguments
@@ -78,6 +80,8 @@ final class BrowserController: UIViewController, WKNavigationDelegate, WKScriptM
             webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         if let s = arg("-url"), let u = URL(string: s) { webView.load(URLRequest(url: u)) }
+        let port = UInt16(arg("-port") ?? "8765") ?? 8765
+        server = try? LabServer(port: port, controller: self)
     }
 
     func userContentController(_ c: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -85,6 +89,69 @@ final class BrowserController: UIViewController, WKNavigationDelegate, WKScriptM
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { titleLabel.text = webView.url?.host ?? titleLabel.text }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { NSLog("LABMSG {\"type\":\"webcontent-crash\"}"); }
+}
+
+
+// Local remote control for the lab: POST http://127.0.0.1:<port>/eval with a JavaScript function body
+// (may use await and return). The answer is the JSON of the returned value.
+final class LabServer {
+    let listener: NWListener
+    weak var controller: BrowserController?
+    init(port: UInt16, controller: BrowserController) throws {
+        listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: port)!)
+        self.controller = controller
+        listener.newConnectionHandler = { [weak self] conn in self?.handle(conn) }
+        listener.start(queue: .main)
+    }
+    func handle(_ conn: NWConnection) {
+        conn.start(queue: .main)
+        var buffer = Data()
+        func readMore() {
+            conn.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { data, _, done, err in
+                if let d = data { buffer.append(d) }
+                if let req = String(data: buffer, encoding: .utf8), let range = req.range(of: "\r\n\r\n") {
+                    let head = String(req[..<range.lowerBound])
+                    var len = 0
+                    for line in head.components(separatedBy: "\r\n") where line.lowercased().hasPrefix("content-length:") {
+                        len = Int(line.split(separator: ":")[1].trimmingCharacters(in: .whitespaces)) ?? 0
+                    }
+                    let bodyStart = req.distance(from: req.startIndex, to: range.upperBound)
+                    let bodyBytes = buffer.count - (req.prefix(bodyStart).utf8.count)
+                    if bodyBytes >= len {
+                        let body = String(data: buffer.suffix(from: req.prefix(bodyStart).utf8.count), encoding: .utf8) ?? ""
+                        self.answer(conn, path: head.components(separatedBy: " ").dropFirst().first ?? "/", body: body)
+                        return
+                    }
+                }
+                if done || err != nil { conn.cancel(); return }
+                readMore()
+            }
+        }
+        readMore()
+    }
+    func reply(_ conn: NWConnection, _ json: String) {
+        let data = json.data(using: .utf8) ?? Data()
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(data.count)\r\nConnection: close\r\n\r\n"
+        conn.send(content: head.data(using: .utf8)! + data, completion: .contentProcessed { _ in conn.cancel() })
+    }
+    func answer(_ conn: NWConnection, path: String, body: String) {
+        guard let wv = controller?.webView else { reply(conn, "{\"error\":\"no webview\"}"); return }
+        if path.hasPrefix("/frame") {
+            let f = wv.convert(wv.bounds, to: nil)
+            reply(conn, "{\"x\":\(f.origin.x),\"y\":\(f.origin.y),\"w\":\(f.size.width),\"h\":\(f.size.height),\"insetTop\":\(wv.scrollView.adjustedContentInset.top),\"insetBottom\":\(wv.scrollView.adjustedContentInset.bottom)}")
+            return
+        }
+        let wrapped = "const __v = await (async function(){ " + body + " })(); return JSON.stringify(__v === undefined ? null : __v);"
+        wv.callAsyncJavaScript(wrapped, arguments: [:], in: nil, in: .page) { result in
+            switch result {
+            case .success(let v): self.reply(conn, "{\"value\":" + ((v as? String) ?? "null") + "}")
+            case .failure(let e):
+                let msg = (e as NSError).userInfo["WKJavaScriptExceptionMessage"] as? String ?? e.localizedDescription
+                let esc = msg.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"").replacingOccurrences(of: "\n", with: " ")
+                self.reply(conn, "{\"error\":\"" + esc + "\"}")
+            }
+        }
+    }
 }
 
 final class AppDelegate: UIResponder, UIApplicationDelegate {

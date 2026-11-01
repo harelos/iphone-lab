@@ -77,7 +77,7 @@ return {ua:navigator.userAgent,lang:navigator.language,vw:vw,vh:vh,dpr:devicePix
 const TOUCH_REC = `if(!window.__labTouches){window.__labTouches=[];['touchstart','touchend','click'].forEach(function(t){document.addEventListener(t,function(e){var el=e.target,p=e.changedTouches&&e.changedTouches[0];window.__labTouches.push({t:t,x:Math.round(p?p.clientX:(e.clientX||0)),y:Math.round(p?p.clientY:(e.clientY||0)),tag:el&&el.tagName,cls:el&&String(el.className||'').slice(0,50),id:el&&el.id,trusted:e.isTrusted,ts:Math.round(performance.now())});if(window.__labTouches.length>60)window.__labTouches.shift()},true)})}`;
 const TOUCHES = `var t=window.__labTouches||[];window.__labTouches=[];return t;`;
 const AIM = function (sel) { return `var e=document.querySelector(${JSON.stringify(sel)});if(!e)return null;var r=e.getBoundingClientRect();var x=r.left+r.width/2,y=r.top+r.height/2;var h=document.elementFromPoint(x,y);return {x:Math.round(x),y:Math.round(y),w:Math.round(r.width),h:Math.round(r.height),hit:h?(e.contains(h)?'self':h.tagName+'.'+String(h.className||'').slice(0,50)+(h.id?'#'+h.id:'')):'none',vh:innerHeight}`; };
-const CARTRES = `return (performance.getEntriesByType('resource')||[]).filter(function(r){return /\/cart|sections=/.test(r.name)}).slice(-8).map(function(r){return {u:r.name.replace(location.origin,'').slice(0,90),start:Math.round(r.startTime),end:Math.round(r.responseEnd),dur:Math.round(r.duration)}})`;
+const CARTRES = `return (performance.getEntriesByType('resource')||[]).filter(function(r){return r.name.indexOf('/cart')>-1||r.name.indexOf('sections=')>-1}).slice(-8).map(function(r){return {u:r.name.replace(location.origin,'').slice(0,90),start:Math.round(r.startTime),end:Math.round(r.responseEnd),dur:Math.round(r.duration)}})`;
 const LCP = `var done=arguments[arguments.length-1];try{var v=null;var po=new PerformanceObserver(function(l){var e=l.getEntries();if(e.length)v=Math.round(e[e.length-1].startTime)});po.observe({type:'largest-contentful-paint',buffered:true});setTimeout(function(){done(v)},400)}catch(e){done('unsupported')}`;
 const CART = `var done=arguments[arguments.length-1];fetch('/cart.js',{credentials:'same-origin'}).then(function(r){return r.json()}).then(function(c){done({count:c.item_count,total:c.total_price,items:(c.items||[]).map(function(i){return {t:i.product_title,v:i.variant_title,q:i.quantity,p:i.final_line_price}})})}).catch(function(e){done({err:String(e)})})`;
 const CLEAR = `var done=arguments[arguments.length-1];fetch('/cart/clear.js',{method:'POST',credentials:'same-origin'}).then(function(){done(true)}).catch(function(e){done(String(e))})`;
@@ -102,8 +102,38 @@ async function runOne({ udid, device, runtime, browser, dir }) {
   const caps = browser === 'safari'
     ? { ...base, browserName: 'Safari', 'appium:safariInitialUrl': 'about:blank', 'appium:safariIgnoreFraudWarning': true }
     : { ...base, 'appium:app': APP, 'appium:bundleId': 'com.tbg.lab.fbiab', 'appium:autoWebview': false,
-        'appium:processArguments': { args: ['-url', url, '-mode', browser] } };
+        'appium:processArguments': { args: ['-url', url, '-mode', browser, '-port', '8765'] } };
   let driver; const T0 = Date.now();
+  const IAB = browser !== 'safari';
+  const PORT = 8765;
+  const http = async (pth, body) => {
+    for (let i = 0; i < 3; i++) {
+      try {
+        const r = await fetch(`http://127.0.0.1:${PORT}${pth}`, { method: 'POST', body: body || '', signal: AbortSignal.timeout(40000) });
+        const j = await r.json();
+        if (j.error) throw new Error('page: ' + j.error);
+        return pth === '/eval' ? j.value : j;
+      } catch (e) { if (i === 2 || String(e.message).startsWith('page:')) throw e; await sleep(1500); }
+    }
+  };
+  const exec = (script) => IAB ? http('/eval', script) : driver.execute(script);
+  const execAsync = (script) => IAB ? http('/eval', 'return await new Promise(function(resolve){ (function(){ ' + script + ' }).call(null, resolve); });') : driver.executeAsync(script);
+  const nativeTapAt = async (x, y) => {
+    if (!IAB) { const w = await driver.getContext(); await driver.switchContext('NATIVE_APP'); await driver.execute('mobile: tap', { x, y }); await driver.switchContext(w); }
+    else await driver.execute('mobile: tap', { x, y });
+  };
+  const tap = async (sel) => {
+    if (!IAB) { const el = await driver.$(sel); await el.click(); return 'native'; }
+    const r = await exec(`var e=document.querySelector(${JSON.stringify(sel)});if(!e)return null;var b=e.getBoundingClientRect();return {x:b.left+b.width/2,y:b.top+b.height/2}`);
+    if (!r) throw new Error('not found ' + sel);
+    const f = await http('/frame');
+    await nativeTapAt(Math.round(f.x + r.x), Math.round(f.y + r.y));
+    return 'native-xy';
+  };
+  const swipe = async (direction, velocity) => {
+    if (!IAB) { const w = await driver.getContext(); await driver.switchContext('NATIVE_APP'); await driver.execute('mobile: swipe', { direction, velocity }).catch(() => {}); await driver.switchContext(w); }
+    else await driver.execute('mobile: swipe', { direction, velocity }).catch(() => {});
+  };
   try {
     driver = await remote({ hostname: '127.0.0.1', port: 4723, path: '/', logLevel: 'error', connectionRetryTimeout: 1200000, connectionRetryCount: 1, capabilities: caps });
     step('session', { ms: Date.now() - T0 });
@@ -112,18 +142,9 @@ async function runOne({ udid, device, runtime, browser, dir }) {
       await driver.setTimeout({ pageLoad: 90000, script: 30000 });
       await driver.url(url);
     } else {
-      await sleep(2500);
+      await sleep(1500);
+      for (let i = 0; i < 120; i++) { const rs = await http('/eval', 'return document.readyState').catch(() => ''); if (rs === 'complete') break; await sleep(500); }
       await driver.saveScreenshot(path.join(dir, '00-app.png')).catch(() => {});
-      let ctx = null;
-      for (let i = 0; i < 4 && !ctx; i++) {
-        const cs = await driver.execute('mobile: getContexts', { waitForWebviewMs: 15000 }).catch(e => { step('contexts-error', { msg: String(e.message).slice(0, 200) }); return []; });
-        step('contexts', { list: (cs || []).map(c => (c.id || c) + ' ' + (c.url || '')).slice(0, 5) });
-        ctx = (cs || []).find(c => String(c.id || c).startsWith('WEBVIEW'));
-      }
-      if (!ctx) throw new Error('no webview context');
-      await driver.switchContext(ctx.id || ctx);
-      await driver.setTimeout({ script: 30000 });
-      for (let i = 0; i < 120; i++) { const rs = await driver.execute('return document.readyState').catch(() => ''); if (rs === 'complete') break; await sleep(500); }
     }
     step('loaded', { ms: Date.now() - tNav });
     if (browser === 'safari') {
@@ -136,10 +157,10 @@ async function runOne({ udid, device, runtime, browser, dir }) {
       } catch (e) { step('safari-tip', { msg: String(e.message).slice(0, 120) }); }
       await driver.switchContext(web0);
     }
-    await driver.execute(TOUCH_REC);
+    await exec(TOUCH_REC);
     await sleep(3000); // deferred scripts, experiments, popups
-    const m1 = await driver.execute(COLLECT);
-    m1.lcp = await driver.executeAsync(LCP).catch(e => 'err:' + e.message);
+    const m1 = await exec(COLLECT);
+    m1.lcp = await execAsync(LCP).catch(e => 'err:' + e.message);
     R.first = m1;
     step('first-screen', { vw: m1.vw, vh: m1.vh, overflow: m1.overflow, mainVis: m1.main.vis, mainY: m1.main.rect && m1.main.rect.y, stickyVis: m1.sticky.vis, overlays: m1.overlays.length, fcp: (m1.paints.find(p => p.n === 'first-contentful-paint') || {}).t, lcp: m1.lcp, load: m1.nav.load, broken: m1.broken.length, errors: (m1.errors || []).length });
     await driver.saveScreenshot(path.join(dir, '01-first.png'));
@@ -147,7 +168,7 @@ async function runOne({ udid, device, runtime, browser, dir }) {
     // Screens down to the buy box and beyond, the way she scrolls with a thumb.
     const vh = m1.vh;
     for (let k = 1; k <= 5; k++) {
-      await driver.execute(`window.scrollTo(0, ${Math.round(vh * 0.9 * k)})`);
+      await exec(`window.scrollTo(0, ${Math.round(vh * 0.9 * k)})`);
       await sleep(900);
       await driver.saveScreenshot(path.join(dir, `0${k + 1}-scroll${k}.png`));
     }
@@ -155,94 +176,88 @@ async function runOne({ udid, device, runtime, browser, dir }) {
 
     // 1. Shade: tap "חום בינוני" (medium brown) with a real touch.
     const shadeSel = '.nh-shade-option-v2[data-nova-shade="mediumbrown"], .nh-shade-option-v2[data-nova-shade="medium"]';
-    let shadeEl = await driver.$(shadeSel);
-    if (!(await shadeEl.isExisting())) shadeEl = await driver.$('.nh-shade-option-v2:nth-of-type(1)');
-    await driver.execute(`var e=document.querySelector('${shadeSel.replace(/'/g, "\\'")}')||document.querySelector('.nh-shade-option-v2');if(e)e.scrollIntoView({block:'center'})`);
+    await exec(`var e=document.querySelector('${shadeSel.replace(/'/g, "\\'")}')||document.querySelector('.nh-shade-option-v2');if(e)e.scrollIntoView({block:'center'})`);
     await sleep(800);
-    const before = await driver.execute(COLLECT);
-    const aimShade = await driver.execute(AIM('.nh-shade-option-v2[data-nova-shade="mediumbrown"]'));
-    await driver.execute(TOUCHES);
+    const before = await exec(COLLECT);
+    const aimShade = await exec(AIM('.nh-shade-option-v2[data-nova-shade="mediumbrown"]'));
+    await exec(TOUCHES);
     let tapMode = 'native';
-    try { await shadeEl.click(); } catch (e) { tapMode = 'js:' + e.message.slice(0, 80); await driver.execute(`var e=document.querySelector('.nh-shade-option-v2[data-nova-shade="mediumbrown"]')||document.querySelector('.nh-shade-option-v2');e&&e.click()`); }
+    try { tapMode = await tap('.nh-shade-option-v2[data-nova-shade="mediumbrown"]'); } catch (e) { tapMode = 'js:' + e.message.slice(0, 80); await exec(`var e=document.querySelector('.nh-shade-option-v2[data-nova-shade="mediumbrown"]')||document.querySelector('.nh-shade-option-v2');e&&e.click()`); }
     await sleep(1500);
-    const afterShade = await driver.execute(COLLECT);
-    step('shade-tap', { tapMode, aim: aimShade, touches: await driver.execute(TOUCHES), before: before.shade, after: afterShade.shade, overlays: afterShade.overlays.map(o => o.cls || o.id).slice(0, 4) });
+    const afterShade = await exec(COLLECT);
+    step('shade-tap', { tapMode, aim: aimShade, touches: await exec(TOUCHES), before: before.shade, after: afterShade.shade, overlays: afterShade.overlays.map(o => o.cls || o.id).slice(0, 4) });
     await driver.saveScreenshot(path.join(dir, '10-after-shade.png'));
     // a shade preview window may open; close it the way she would (its close button)
-    const closePrev = await driver.$('[aria-label="סגירת תצוגת הגוון"], .nh-shade-dialog-close-v2, .nh-shade-modal-v2:not([hidden]) button[aria-label*="סגיר"]');
-    if (await closePrev.isExisting().catch(() => false) && await closePrev.isDisplayed().catch(() => false)) { try { await closePrev.click(); } catch (_) {} await sleep(800); step('closed-shade-preview', {}); }
+    const prevOpen = await exec(`var m=document.querySelector('.nh-shade-modal-v2');return !!(m&&!m.hidden&&m.getBoundingClientRect().height>0)`).catch(() => false);
+    if (prevOpen) { try { await tap('[aria-label="סגירת תצוגת הגוון"]'); } catch (_) {} await sleep(800); step('closed-shade-preview', {}); }
 
     // 2. Pack: tap the 2-bottle card.
-    const pack = await driver.$('.bundle-card[data-nova-bundle="2"]');
-    await driver.execute(`var e=document.querySelector('.bundle-card[data-nova-bundle="2"]');if(e)e.scrollIntoView({block:'center'})`);
+    await exec(`var e=document.querySelector('.bundle-card[data-nova-bundle="2"]');if(e)e.scrollIntoView({block:'center'})`);
     await sleep(1200);
-    const aimPack = await driver.execute(AIM('.bundle-card[data-nova-bundle="2"]'));
-    await driver.execute(TOUCHES);
-    try { await pack.click(); tapMode = 'native'; } catch (e) { tapMode = 'js:' + e.message.slice(0, 80); await driver.execute(`var e=document.querySelector('.bundle-card[data-nova-bundle="2"]');e&&e.click()`); }
+    const aimPack = await exec(AIM('.bundle-card[data-nova-bundle="2"]'));
+    await exec(TOUCHES);
+    try { tapMode = await tap('.bundle-card[data-nova-bundle="2"]'); } catch (e) { tapMode = 'js:' + e.message.slice(0, 80); await exec(`var e=document.querySelector('.bundle-card[data-nova-bundle="2"]');e&&e.click()`); }
     await sleep(1200);
-    const afterPack = await driver.execute(COLLECT);
-    step('pack-tap', { tapMode, aim: aimPack, touches: await driver.execute(TOUCHES), pack: afterPack.pack, main: afterPack.main.text });
+    const afterPack = await exec(COLLECT);
+    step('pack-tap', { tapMode, aim: aimPack, touches: await exec(TOUCHES), pack: afterPack.pack, main: afterPack.main.text });
     await driver.saveScreenshot(path.join(dir, '11-after-pack.png'));
 
     // 3. Add to cart with the main button.
-    await driver.execute(`var e=document.querySelector('#mainCheckout');if(e)e.scrollIntoView({block:'center'})`);
+    await exec(`var e=document.querySelector('#mainCheckout');if(e)e.scrollIntoView({block:'center'})`);
     await sleep(900);
-    const preBuy = await driver.execute(COLLECT);
-    const aimBuy = await driver.execute(AIM('#mainCheckout'));
-    await driver.execute(TOUCHES);
-    const buyBtn = await driver.$('#mainCheckout');
+    const preBuy = await exec(COLLECT);
+    const aimBuy = await exec(AIM('#mainCheckout'));
+    await exec(TOUCHES);
+    await exec(`window.__labDrawerAt=null;var d=document.querySelector('cart-drawer');if(d&&!window.__labDrawerObs){window.__labDrawerObs=new MutationObserver(function(){if(d.classList.contains('active')&&!window.__labDrawerAt)window.__labDrawerAt=Math.round(performance.now())});window.__labDrawerObs.observe(d,{attributes:true,attributeFilter:['class']})}`);
     const tBuy = Date.now();
-    try { await buyBtn.click(); tapMode = 'native'; } catch (e) { tapMode = 'js:' + e.message.slice(0, 80); await driver.execute(`document.querySelector('#mainCheckout').click()`); }
+    try { tapMode = await tap('#mainCheckout'); } catch (e) { tapMode = 'js:' + e.message.slice(0, 80); await exec(`document.querySelector('#mainCheckout').click()`); }
     let cart = null, drawerOpenMs = null;
     for (let i = 0; i < 24; i++) {
       await sleep(500);
-      const d = await driver.execute(`var d=document.querySelector('cart-drawer');return d?d.classList.contains('active'):null`);
+      const d = await exec(`var d=document.querySelector('cart-drawer');return d?d.classList.contains('active'):null`);
       if (d && drawerOpenMs === null) drawerOpenMs = Date.now() - tBuy;
       if (d) break;
     }
     await sleep(1200);
-    cart = await driver.executeAsync(CART).catch(e => ({ err: e.message }));
-    const inCart = await driver.execute(COLLECT);
-    step('add-to-cart', { tapMode, aim: aimBuy, touches: await driver.execute(TOUCHES), cartRequests: await driver.execute(CARTRES), mainHitBefore: preBuy.main.hit, drawerOpenMs, cartCount: cart && cart.count, items: cart && cart.items, checkout: inCart.drawer && inCart.drawer.checkout, overlays: inCart.overlays.map(o => (o.cls || o.id) + ':' + o.share + '%').slice(0, 5) });
+    cart = await execAsync(CART).catch(e => ({ err: e.message }));
+    const inCart = await exec(COLLECT);
+    const buyTouches = await exec(TOUCHES);
+    const drawerAt = await exec('return window.__labDrawerAt');
+    const firstTouch = (buyTouches || []).find(t => t.t === 'touchstart');
+    step('add-to-cart', { tapMode, aim: aimBuy, touches: buyTouches, drawerAfterTouchMs: drawerAt && firstTouch ? drawerAt - firstTouch.ts : null, cartRequests: await exec(CARTRES), mainHitBefore: preBuy.main.hit, drawerOpenMs, cartCount: cart && cart.count, items: cart && cart.items, checkout: inCart.drawer && inCart.drawer.checkout, overlays: inCart.overlays.map(o => (o.cls || o.id) + ':' + o.share + '%').slice(0, 5) });
     R.cart = { cart, drawer: inCart.drawer, vv: inCart.vv, vh: inCart.vh };
     await driver.saveScreenshot(path.join(dir, '20-cart.png'));
     // can she reach the checkout button? scroll the drawer's footer into view and hit-test it
-    const coCheck = await driver.execute(`var co=document.querySelector('#CartDrawer-Checkout')||document.querySelector('cart-drawer [name="checkout"]');if(!co)return null;var r=co.getBoundingClientRect();var x=r.left+r.width/2,y=r.top+r.height/2;var t=document.elementFromPoint(x,y);return {y:Math.round(r.top),h:Math.round(r.height),bottomGap:Math.round(innerHeight-r.bottom),hit:t?(co.contains(t)?'ok':t.tagName+'.'+String(t.className||'').slice(0,40)):'none',disabled:co.disabled===true}`);
+    const coCheck = await exec(`var co=document.querySelector('#CartDrawer-Checkout')||document.querySelector('cart-drawer [name="checkout"]');if(!co)return null;var r=co.getBoundingClientRect();var x=r.left+r.width/2,y=r.top+r.height/2;var t=document.elementFromPoint(x,y);return {y:Math.round(r.top),h:Math.round(r.height),bottomGap:Math.round(innerHeight-r.bottom),hit:t?(co.contains(t)?'ok':t.tagName+'.'+String(t.className||'').slice(0,40)):'none',disabled:co.disabled===true}`);
     step('checkout-button', coCheck || {});
     // close the cart with its close button, then empty it
-    const closeCart = await driver.$('cart-drawer .drawer__close, cart-drawer button[aria-label="סגור סל"], cart-drawer [aria-label*="סגור"]');
-    if (await closeCart.isExisting().catch(() => false)) { try { await closeCart.click(); } catch (_) {} await sleep(900); }
-    const cleared = await driver.executeAsync(CLEAR).catch(e => e.message);
-    step('cart-cleared', { cleared, drawerActive: await driver.execute(`var d=document.querySelector('cart-drawer');return d?d.classList.contains('active'):null`) });
+    try { await tap('cart-drawer .drawer__close'); } catch (_) {}
+    await sleep(900);
+    const cleared = await execAsync(CLEAR).catch(e => e.message);
+    step('cart-cleared', { cleared, drawerActive: await exec(`var d=document.querySelector('cart-drawer');return d?d.classList.contains('active'):null`) });
 
     // 4. Thumb scroll with real swipes, then the bottom bar, then a fast flick back up (exit-sheet trap).
-    const web = await driver.getContext();
-    await driver.switchContext('NATIVE_APP');
-    for (let s = 0; s < 4; s++) { await driver.execute('mobile: swipe', { direction: 'up', velocity: 900 }).catch(() => {}); await sleep(700); }
-    await driver.switchContext(web);
+    for (let k = 0; k < 4; k++) { await swipe('up', 900); await sleep(700); }
     await sleep(1200);
-    const scrolled = await driver.execute(COLLECT);
+    const scrolled = await exec(COLLECT);
     step('after-swipes', { scrollY: scrolled.scrollY, stickyVis: scrolled.sticky.vis, stickyHit: scrolled.sticky.hit, stickyRect: scrolled.sticky.rect, vv: scrolled.vv, overlays: scrolled.overlays.map(o => (o.cls || o.id) + ':' + o.share + '%').slice(0, 5) });
     await driver.saveScreenshot(path.join(dir, '30-swiped.png'));
     if (scrolled.sticky.vis) {
-      const st = await driver.$('#stickyCtaBtn');
       const y0 = scrolled.scrollY;
-      try { await st.click(); tapMode = 'native'; } catch (e) { tapMode = 'js:' + e.message.slice(0, 80); }
+      try { tapMode = await tap('#stickyCtaBtn'); } catch (e) { tapMode = 'js:' + e.message.slice(0, 80); }
       await sleep(2000);
-      const afterSticky = await driver.execute(COLLECT);
+      const afterSticky = await exec(COLLECT);
       step('sticky-tap', { tapMode, scrollFrom: y0, scrollTo: afterSticky.scrollY, buyTop: afterSticky.buyTop, drawer: afterSticky.drawer && afterSticky.drawer.active, overlays: afterSticky.overlays.map(o => (o.cls || o.id) + ':' + o.share + '%').slice(0, 5) });
       await driver.saveScreenshot(path.join(dir, '31-after-sticky.png'));
-      await driver.executeAsync(CLEAR).catch(() => {});
-      await driver.execute(`var d=document.querySelector('cart-drawer');if(d&&d.classList.contains('active')){var b=d.querySelector('.drawer__close');b&&b.click()}`);
+      await execAsync(CLEAR).catch(() => {});
+      await exec(`var d=document.querySelector('cart-drawer');if(d&&d.classList.contains('active')){var b=d.querySelector('.drawer__close');b&&b.click()}`);
     }
     // fast flick up after reading for a while
-    await driver.execute(`window.scrollTo(0, Math.round(document.documentElement.scrollHeight*0.45))`);
+    await exec(`window.scrollTo(0, Math.round(document.documentElement.scrollHeight*0.45))`);
     await sleep(13000);
-    await driver.switchContext('NATIVE_APP');
-    await driver.execute('mobile: swipe', { direction: 'down', velocity: 4000 }).catch(() => {});
-    await driver.switchContext(web);
+    await swipe('down', 4000);
     await sleep(1800);
-    const flick = await driver.execute(COLLECT);
+    const flick = await exec(COLLECT);
     step('fast-flick-up', { scrollY: flick.scrollY, overlays: flick.overlays.map(o => (o.cls || o.id) + ':' + o.share + '%').slice(0, 5) });
     await driver.saveScreenshot(path.join(dir, '40-flick.png'));
 
