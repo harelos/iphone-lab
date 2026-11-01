@@ -1,0 +1,19 @@
+
+# iphone-lab: keep test visits out of ad and analytics data (scripts still load)
+0.0.0.0 www.facebook.com
+0.0.0.0 facebook.com
+0.0.0.0 m.facebook.com
+0.0.0.0 www.google-analytics.com
+0.0.0.0 region1.google-analytics.com
+0.0.0.0 analytics.google.com
+0.0.0.0 stats.g.doubleclick.net
+0.0.0.0 googleads.g.doubleclick.net
+0.0.0.0 ad.doubleclick.net
+0.0.0.0 td.doubleclick.net
+0.0.0.0 www.googleadservices.com
+0.0.0.0 www.google.com
+0.0.0.0 www.google.co.il
+0.0.0.0 monorail-edge.shopifysvc.com
+0.0.0.0 analytics.tiktok.com
+0.0.0.0 bat.bing.com
+0.0.0.0 www.clarity.ms

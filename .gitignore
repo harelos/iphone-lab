@@ -1,0 +1,5 @@
+node_modules/
+out/
+wda-derived/
+fbiab/build/
+appium.log

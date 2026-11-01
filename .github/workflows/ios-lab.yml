@@ -1,0 +1,68 @@
+name: ios-lab
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: Page to test
+        required: true
+        default: https://tigerbrandsglobal.com/pages/novahair-offer-t2
+      browsers:
+        description: safari,fb,ig
+        required: true
+        default: safari,fb,ig
+      matrix:
+        description: JSON list of {runner,xcode,runtime,devices}
+        required: true
+        default: '[{"runner":"macos-26","xcode":"26.6","runtime":"iOS 26.5","devices":"iPhone 17"}]'
+jobs:
+  lab:
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+      - name: Keep test visits out of ad and analytics data
+        run: |
+          sudo sh -c 'cat lab/hosts-block.txt >> /etc/hosts'
+          sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder || true
+      - name: Xcode and simulators
+        run: |
+          sudo xcode-select -s "/Applications/Xcode_${{ matrix.xcode }}.app"
+          xcodebuild -version
+          xcrun simctl list runtimes
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: WDA cache
+        uses: actions/cache@v4
+        with:
+          path: wda-derived
+          key: wda-${{ matrix.runner }}-${{ matrix.xcode }}-v1
+      - name: Install Appium
+        run: |
+          npm i -g appium@latest
+          appium driver install xcuitest
+          cd lab && npm i --no-audit --no-fund
+      - name: Build the Facebook / Instagram style browser
+        run: bash fbiab/build.sh
+      - name: Start Appium
+        run: |
+          nohup appium --address 127.0.0.1 --port 4723 --log-timestamp --log appium.log --log-level info > /dev/null 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:4723/status >/dev/null && break; sleep 2; done
+          curl -s http://127.0.0.1:4723/status
+      - name: Run the lab
+        env:
+          WDA_DIR: ${{ github.workspace }}/wda-derived
+        run: node lab/run.mjs --url "${{ inputs.url }}" --runtime "${{ matrix.runtime }}" --devices "${{ matrix.devices }}" --browsers "${{ inputs.browsers }}" --out out
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lab-${{ matrix.runner }}-${{ strategy.job-index }}
+          path: |
+            out
+            appium.log
+          retention-days: 7
