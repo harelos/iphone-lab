@@ -46,6 +46,14 @@ jobs:
           npm i -g appium@latest
           appium driver install xcuitest
           cd lab && npm i --no-audit --no-fund
+      - name: Prebuilt WebDriverAgent (skips a 13-minute build)
+        run: |
+          mkdir -p wda-prebuilt
+          appium driver run xcuitest download-wda -- --outdir="$PWD/wda-prebuilt" --kind=sim --platform=ios || true
+          ls -la wda-prebuilt || true
+          cd wda-prebuilt && for z in *.zip; do [ -f "$z" ] && unzip -q -o "$z"; done; cd ..
+          APP=$(find "$PWD/wda-prebuilt" -maxdepth 4 -name 'WebDriverAgentRunner-Runner.app' | head -1)
+          echo "WDA_APP=$APP" >> "$GITHUB_ENV"; echo "prebuilt: $APP"
       - name: Build the Facebook / Instagram style browser
         run: bash fbiab/build.sh
       - name: Start Appium
@@ -54,6 +62,7 @@ jobs:
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:4723/status >/dev/null && break; sleep 2; done
           curl -s http://127.0.0.1:4723/status
       - name: Run the lab
+        timeout-minutes: 75
         env:
           WDA_DIR: ${{ github.workspace }}/wda-derived
         run: node lab/run.mjs --url "${{ inputs.url }}" --runtime "${{ matrix.runtime }}" --devices "${{ matrix.devices }}" --browsers "${{ inputs.browsers }}" --out out

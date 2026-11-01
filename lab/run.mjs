@@ -74,6 +74,10 @@ return {ua:navigator.userAgent,lang:navigator.language,vw:vw,vh:vh,dpr:devicePix
  drawer:(function(){var d=q('cart-drawer');if(!d)return null;var co=q('#CartDrawer-Checkout')||q('cart-drawer [name="checkout"]');return {active:d.classList.contains('active'),checkout:{rect:rect(co),vis:vis(co),hit:hit(co)}}})()};
 `;
 
+const TOUCH_REC = `if(!window.__labTouches){window.__labTouches=[];['touchstart','touchend','click'].forEach(function(t){document.addEventListener(t,function(e){var el=e.target,p=e.changedTouches&&e.changedTouches[0];window.__labTouches.push({t:t,x:Math.round(p?p.clientX:(e.clientX||0)),y:Math.round(p?p.clientY:(e.clientY||0)),tag:el&&el.tagName,cls:el&&String(el.className||'').slice(0,50),id:el&&el.id,trusted:e.isTrusted,ts:Math.round(performance.now())});if(window.__labTouches.length>60)window.__labTouches.shift()},true)})}`;
+const TOUCHES = `var t=window.__labTouches||[];window.__labTouches=[];return t;`;
+const AIM = function (sel) { return `var e=document.querySelector(${JSON.stringify(sel)});if(!e)return null;var r=e.getBoundingClientRect();var x=r.left+r.width/2,y=r.top+r.height/2;var h=document.elementFromPoint(x,y);return {x:Math.round(x),y:Math.round(y),w:Math.round(r.width),h:Math.round(r.height),hit:h?(e.contains(h)?'self':h.tagName+'.'+String(h.className||'').slice(0,50)+(h.id?'#'+h.id:'')):'none',vh:innerHeight}`; };
+const CARTRES = `return (performance.getEntriesByType('resource')||[]).filter(function(r){return /\/cart|sections=/.test(r.name)}).slice(-8).map(function(r){return {u:r.name.replace(location.origin,'').slice(0,90),start:Math.round(r.startTime),end:Math.round(r.responseEnd),dur:Math.round(r.duration)}})`;
 const LCP = `var done=arguments[arguments.length-1];try{var v=null;var po=new PerformanceObserver(function(l){var e=l.getEntries();if(e.length)v=Math.round(e[e.length-1].startTime)});po.observe({type:'largest-contentful-paint',buffered:true});setTimeout(function(){done(v)},400)}catch(e){done('unsupported')}`;
 const CART = `var done=arguments[arguments.length-1];fetch('/cart.js',{credentials:'same-origin'}).then(function(r){return r.json()}).then(function(c){done({count:c.item_count,total:c.total_price,items:(c.items||[]).map(function(i){return {t:i.product_title,v:i.variant_title,q:i.quantity,p:i.final_line_price}})})}).catch(function(e){done({err:String(e)})})`;
 const CLEAR = `var done=arguments[arguments.length-1];fetch('/cart/clear.js',{method:'POST',credentials:'same-origin'}).then(function(){done(true)}).catch(function(e){done(String(e))})`;
@@ -93,6 +97,7 @@ async function runOne({ udid, device, runtime, browser, dir }) {
     'appium:derivedDataPath': WDA_DIR, 'appium:webviewConnectTimeout': 45000,
     'appium:showSafariConsoleLog': true, 'appium:showSafariNetworkLog': false,
     'appium:simulatorStartupTimeout': 600000, 'appium:connectHardwareKeyboard': false,
+    ...(process.env.WDA_APP ? { 'appium:usePreinstalledWDA': true, 'appium:prebuiltWDAPath': process.env.WDA_APP } : {}),
   };
   const caps = browser === 'safari'
     ? { ...base, browserName: 'Safari', 'appium:safariInitialUrl': 'about:blank', 'appium:safariIgnoreFraudWarning': true }
@@ -107,11 +112,13 @@ async function runOne({ udid, device, runtime, browser, dir }) {
       await driver.setTimeout({ pageLoad: 90000, script: 30000 });
       await driver.url(url);
     } else {
+      await sleep(2500);
+      await driver.saveScreenshot(path.join(dir, '00-app.png')).catch(() => {});
       let ctx = null;
-      for (let i = 0; i < 90 && !ctx; i++) {
-        const cs = await driver.getContexts();
-        ctx = cs.find(c => String(c.id || c).startsWith('WEBVIEW'));
-        if (!ctx) await sleep(500);
+      for (let i = 0; i < 4 && !ctx; i++) {
+        const cs = await driver.execute('mobile: getContexts', { waitForWebviewMs: 15000 }).catch(e => { step('contexts-error', { msg: String(e.message).slice(0, 200) }); return []; });
+        step('contexts', { list: (cs || []).map(c => (c.id || c) + ' ' + (c.url || '')).slice(0, 5) });
+        ctx = (cs || []).find(c => String(c.id || c).startsWith('WEBVIEW'));
       }
       if (!ctx) throw new Error('no webview context');
       await driver.switchContext(ctx.id || ctx);
@@ -119,6 +126,17 @@ async function runOne({ udid, device, runtime, browser, dir }) {
       for (let i = 0; i < 120; i++) { const rs = await driver.execute('return document.readyState').catch(() => ''); if (rs === 'complete') break; await sleep(500); }
     }
     step('loaded', { ms: Date.now() - tNav });
+    if (browser === 'safari') {
+      // A brand-new simulator shows Safari's one-time tip over the page bottom; real users dismissed it long ago.
+      const web0 = await driver.getContext();
+      try {
+        await driver.switchContext('NATIVE_APP');
+        const x = await driver.$('//XCUIElementTypeButton[(@label="סגירה" or @label="Close" or @name="Close") and not(ancestor::XCUIElementTypeWebView)]');
+        if (await x.isExisting()) { await x.click(); step('safari-tip-closed', {}); }
+      } catch (e) { step('safari-tip', { msg: String(e.message).slice(0, 120) }); }
+      await driver.switchContext(web0);
+    }
+    await driver.execute(TOUCH_REC);
     await sleep(3000); // deferred scripts, experiments, popups
     const m1 = await driver.execute(COLLECT);
     m1.lcp = await driver.executeAsync(LCP).catch(e => 'err:' + e.message);
@@ -142,11 +160,13 @@ async function runOne({ udid, device, runtime, browser, dir }) {
     await driver.execute(`var e=document.querySelector('${shadeSel.replace(/'/g, "\\'")}')||document.querySelector('.nh-shade-option-v2');if(e)e.scrollIntoView({block:'center'})`);
     await sleep(800);
     const before = await driver.execute(COLLECT);
+    const aimShade = await driver.execute(AIM('.nh-shade-option-v2[data-nova-shade="mediumbrown"]'));
+    await driver.execute(TOUCHES);
     let tapMode = 'native';
     try { await shadeEl.click(); } catch (e) { tapMode = 'js:' + e.message.slice(0, 80); await driver.execute(`var e=document.querySelector('.nh-shade-option-v2[data-nova-shade="mediumbrown"]')||document.querySelector('.nh-shade-option-v2');e&&e.click()`); }
     await sleep(1500);
     const afterShade = await driver.execute(COLLECT);
-    step('shade-tap', { tapMode, before: before.shade, after: afterShade.shade, overlays: afterShade.overlays.map(o => o.cls || o.id).slice(0, 4) });
+    step('shade-tap', { tapMode, aim: aimShade, touches: await driver.execute(TOUCHES), before: before.shade, after: afterShade.shade, overlays: afterShade.overlays.map(o => o.cls || o.id).slice(0, 4) });
     await driver.saveScreenshot(path.join(dir, '10-after-shade.png'));
     // a shade preview window may open; close it the way she would (its close button)
     const closePrev = await driver.$('[aria-label="סגירת תצוגת הגוון"], .nh-shade-dialog-close-v2, .nh-shade-modal-v2:not([hidden]) button[aria-label*="סגיר"]');
@@ -155,17 +175,21 @@ async function runOne({ udid, device, runtime, browser, dir }) {
     // 2. Pack: tap the 2-bottle card.
     const pack = await driver.$('.bundle-card[data-nova-bundle="2"]');
     await driver.execute(`var e=document.querySelector('.bundle-card[data-nova-bundle="2"]');if(e)e.scrollIntoView({block:'center'})`);
-    await sleep(800);
+    await sleep(1200);
+    const aimPack = await driver.execute(AIM('.bundle-card[data-nova-bundle="2"]'));
+    await driver.execute(TOUCHES);
     try { await pack.click(); tapMode = 'native'; } catch (e) { tapMode = 'js:' + e.message.slice(0, 80); await driver.execute(`var e=document.querySelector('.bundle-card[data-nova-bundle="2"]');e&&e.click()`); }
     await sleep(1200);
     const afterPack = await driver.execute(COLLECT);
-    step('pack-tap', { tapMode, pack: afterPack.pack, main: afterPack.main.text });
+    step('pack-tap', { tapMode, aim: aimPack, touches: await driver.execute(TOUCHES), pack: afterPack.pack, main: afterPack.main.text });
     await driver.saveScreenshot(path.join(dir, '11-after-pack.png'));
 
     // 3. Add to cart with the main button.
     await driver.execute(`var e=document.querySelector('#mainCheckout');if(e)e.scrollIntoView({block:'center'})`);
     await sleep(900);
     const preBuy = await driver.execute(COLLECT);
+    const aimBuy = await driver.execute(AIM('#mainCheckout'));
+    await driver.execute(TOUCHES);
     const buyBtn = await driver.$('#mainCheckout');
     const tBuy = Date.now();
     try { await buyBtn.click(); tapMode = 'native'; } catch (e) { tapMode = 'js:' + e.message.slice(0, 80); await driver.execute(`document.querySelector('#mainCheckout').click()`); }
@@ -179,7 +203,7 @@ async function runOne({ udid, device, runtime, browser, dir }) {
     await sleep(1200);
     cart = await driver.executeAsync(CART).catch(e => ({ err: e.message }));
     const inCart = await driver.execute(COLLECT);
-    step('add-to-cart', { tapMode, mainHitBefore: preBuy.main.hit, drawerOpenMs, cartCount: cart && cart.count, items: cart && cart.items, checkout: inCart.drawer && inCart.drawer.checkout, overlays: inCart.overlays.map(o => (o.cls || o.id) + ':' + o.share + '%').slice(0, 5) });
+    step('add-to-cart', { tapMode, aim: aimBuy, touches: await driver.execute(TOUCHES), cartRequests: await driver.execute(CARTRES), mainHitBefore: preBuy.main.hit, drawerOpenMs, cartCount: cart && cart.count, items: cart && cart.items, checkout: inCart.drawer && inCart.drawer.checkout, overlays: inCart.overlays.map(o => (o.cls || o.id) + ':' + o.share + '%').slice(0, 5) });
     R.cart = { cart, drawer: inCart.drawer, vv: inCart.vv, vh: inCart.vh };
     await driver.saveScreenshot(path.join(dir, '20-cart.png'));
     // can she reach the checkout button? scroll the drawer's footer into view and hit-test it
