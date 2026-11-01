@@ -83,9 +83,12 @@ const CART = `var done=arguments[arguments.length-1];fetch('/cart.js',{credentia
 const CLEAR = `var done=arguments[arguments.length-1];fetch('/cart/clear.js',{method:'POST',credentials:'same-origin'}).then(function(){done(true)}).catch(function(e){done(String(e))})`;
 
 // ---------------------------------------------------------------- one browser on one device
-async function runOne({ udid, device, runtime, browser, dir }) {
+async function runOne({ udid, device, runtime, browser: label, dir }) {
+  const dark = label.endsWith('-dark');
+  const browser = label.replace(/-dark$/, '');
+  try { sh(`xcrun simctl ui ${udid} appearance ${dark ? 'dark' : 'light'}`); } catch (_) {}
   fs.mkdirSync(dir, { recursive: true });
-  const R = { device, runtime: runtime.name, browser, steps: [], startedAt: new Date().toISOString() };
+  const R = { device, runtime: runtime.name, browser: label, steps: [], startedAt: new Date().toISOString() };
   const step = (name, data) => { R.steps.push({ name, t: Date.now() - T0, ...data }); log(device, browser, name, JSON.stringify(data).slice(0, 220)); };
   const url = testUrl(URL0);
   const base = {
@@ -138,10 +141,23 @@ async function runOne({ udid, device, runtime, browser, dir }) {
     driver = await remote({ hostname: '127.0.0.1', port: 4723, path: '/', logLevel: 'error', connectionRetryTimeout: 1200000, connectionRetryCount: 1, capabilities: caps });
     step('session', { ms: Date.now() - T0 });
     const tNav = Date.now();
+    const film = async () => {
+      const marks = [700, 1400, 2100, 2800, 3500, 4500, 6000, 8000];
+      const t0 = Date.now();
+      for (const m of marks) { const w = m - (Date.now() - t0); if (w > 0) await sleep(w); await driver.saveScreenshot(path.join(dir, `f${String(m).padStart(5, '0')}.png`)).catch(() => {}); }
+    };
     if (browser === 'safari') {
       await driver.setTimeout({ pageLoad: 90000, script: 30000 });
-      await driver.url(url);
+      await driver.execute(`setTimeout(function(){location.href=${JSON.stringify(url)}},50)`);
+      await film();
+      for (let i = 0; i < 120; i++) { const rs = await driver.execute('return location.href.indexOf("tigerbrandsglobal")>-1 && document.readyState').catch(() => ''); if (rs === 'complete') break; await sleep(500); }
     } else {
+      // cold start like a first tap on an ad: clear the in-app browser's data, then load and film it
+      for (let i = 0; i < 60; i++) { if (await http('/frame').then(() => true).catch(() => false)) break; await sleep(500); }
+      await http('/clear').catch(() => {});
+      await sleep(600);
+      await http('/eval', `setTimeout(function(){location.href=${JSON.stringify(url)}},50); return 1`).catch(() => {});
+      await film();
       await sleep(1500);
       for (let i = 0; i < 120; i++) { const rs = await http('/eval', 'return document.readyState').catch(() => ''); if (rs === 'complete') break; await sleep(500); }
       await driver.saveScreenshot(path.join(dir, '00-app.png')).catch(() => {});
@@ -261,6 +277,14 @@ async function runOne({ udid, device, runtime, browser, dir }) {
     step('fast-flick-up', { scrollY: flick.scrollY, overlays: flick.overlays.map(o => (o.cls || o.id) + ':' + o.share + '%').slice(0, 5) });
     await driver.saveScreenshot(path.join(dir, '40-flick.png'));
 
+    try {
+      if (!IAB) { const w = await driver.getContext(); await driver.switchContext('NATIVE_APP'); await driver.execute('mobile: backgroundApp', { seconds: 4 }); await driver.switchContext(w); }
+      else await driver.execute('mobile: backgroundApp', { seconds: 4 });
+      await sleep(2500);
+      const back = await exec(COLLECT);
+      step('app-switch-return', { overlays: back.overlays.map(o => (o.cls || o.id) + ':' + o.share + '%').slice(0, 5) });
+      await driver.saveScreenshot(path.join(dir, '41-return.png'));
+    } catch (e) { step('app-switch-return', { err: String(e.message).slice(0, 160) }); }
     R.last = flick;
     try { R.console = (await driver.getLogs('safariConsole')).slice(-80).map(x => ({ level: x.level, msg: String(x.message || x.text || '').slice(0, 400) })); } catch (e) { R.console = 'n/a: ' + e.message.slice(0, 80); }
     if (browser !== 'safari') { try { R.syslog = (await driver.getLogs('syslog')).map(x => String(x.message)).filter(s => s.includes('LABMSG')).slice(-60); } catch (_) {} }

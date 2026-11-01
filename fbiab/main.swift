@@ -136,6 +136,13 @@ final class LabServer {
     }
     func answer(_ conn: NWConnection, path: String, body: String) {
         guard let wv = controller?.webView else { reply(conn, "{\"error\":\"no webview\"}"); return }
+        if path.hasPrefix("/clear") {
+            WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: Date(timeIntervalSince1970: 0)) {
+                wv.load(URLRequest(url: URL(string: "about:blank")!))
+                self.reply(conn, "{\"ok\":true}")
+            }
+            return
+        }
         if path.hasPrefix("/frame") {
             let f = wv.convert(wv.bounds, to: nil)
             reply(conn, "{\"x\":\(f.origin.x),\"y\":\(f.origin.y),\"w\":\(f.size.width),\"h\":\(f.size.height),\"insetTop\":\(wv.scrollView.adjustedContentInset.top),\"insetBottom\":\(wv.scrollView.adjustedContentInset.bottom)}")
