@@ -74,7 +74,7 @@ return {ua:navigator.userAgent,lang:navigator.language,vw:vw,vh:vh,dpr:devicePix
  drawer:(function(){var d=q('cart-drawer');if(!d)return null;var co=q('#CartDrawer-Checkout')||q('cart-drawer [name="checkout"]');return {active:d.classList.contains('active'),checkout:{rect:rect(co),vis:vis(co),hit:hit(co)}}})()};
 `;
 
-const TOUCH_REC = `if(!window.__labTouches){window.__labTouches=[];['touchstart','touchend','click'].forEach(function(t){document.addEventListener(t,function(e){var el=e.target,p=e.changedTouches&&e.changedTouches[0];window.__labTouches.push({t:t,x:Math.round(p?p.clientX:(e.clientX||0)),y:Math.round(p?p.clientY:(e.clientY||0)),tag:el&&el.tagName,cls:el&&String(el.className||'').slice(0,50),id:el&&el.id,trusted:e.isTrusted,ts:Math.round(performance.now())});if(window.__labTouches.length>60)window.__labTouches.shift()},true)})}`;
+const TOUCH_REC = `if(!window.__labTouches){window.__labTouches=[];['touchstart','touchend','touchcancel','click'].forEach(function(t){document.addEventListener(t,function(e){var el=e.target,p=e.changedTouches&&e.changedTouches[0];window.__labTouches.push({t:t,x:Math.round(p?p.clientX:(e.clientX||0)),y:Math.round(p?p.clientY:(e.clientY||0)),tag:el&&el.tagName,cls:el&&String(el.className||'').slice(0,50),id:el&&el.id,trusted:e.isTrusted,ts:Math.round(performance.now())});if(window.__labTouches.length>60)window.__labTouches.shift()},true)})}`;
 const TOUCHES = `var t=window.__labTouches||[];window.__labTouches=[];return t;`;
 const AIM = function (sel) { return `var e=document.querySelector(${JSON.stringify(sel)});if(!e)return null;var r=e.getBoundingClientRect();var x=r.left+r.width/2,y=r.top+r.height/2;var h=document.elementFromPoint(x,y);return {x:Math.round(x),y:Math.round(y),w:Math.round(r.width),h:Math.round(r.height),hit:h?(e.contains(h)?'self':h.tagName+'.'+String(h.className||'').slice(0,50)+(h.id?'#'+h.id:'')):'none',vh:innerHeight}`; };
 const CARTRES = `return (performance.getEntriesByType('resource')||[]).filter(function(r){return r.name.indexOf('/cart')>-1||r.name.indexOf('sections=')>-1}).slice(-8).map(function(r){return {u:r.name.replace(location.origin,'').slice(0,90),start:Math.round(r.startTime),end:Math.round(r.responseEnd),dur:Math.round(r.duration)}})`;
@@ -125,7 +125,18 @@ async function runOne({ udid, device, runtime, browser: label, dir }) {
     if (!IAB) { const w = await driver.getContext(); await driver.switchContext('NATIVE_APP'); await driver.execute('mobile: tap', { x, y }); await driver.switchContext(w); }
     else await driver.execute('mobile: tap', { x, y });
   };
+  const settle = async (sel) => {
+    // wait until the target stops moving (images loading above it, the toolbar collapsing) before the finger goes down
+    let last = null;
+    for (let i = 0; i < 14; i++) {
+      const r = await exec(`var e=document.querySelector(${JSON.stringify(sel)});if(!e)return null;var b=e.getBoundingClientRect();return Math.round(b.top)+','+Math.round(b.left)+','+Math.round(scrollY)+','+innerHeight`).catch(() => null);
+      if (r && r === last) return true;
+      last = r; await sleep(300);
+    }
+    return false;
+  };
   const tap = async (sel) => {
+    await settle(sel);
     if (!IAB) { const el = await driver.$(sel); await el.click(); return 'native'; }
     const r = await exec(`var e=document.querySelector(${JSON.stringify(sel)});if(!e)return null;var b=e.getBoundingClientRect();return {x:b.left+b.width/2,y:b.top+b.height/2}`);
     if (!r) throw new Error('not found ' + sel);
